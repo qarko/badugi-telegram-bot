@@ -218,20 +218,20 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.create_deck()
     
     keyboard = [
-        [InlineKeyboardButton("🎮 게임 참가", callback_data="join_game")],
+        [InlineKeyboardButton("➕ 게임 참가하기", callback_data="join_game")],
         [InlineKeyboardButton("❌ 게임 취소", callback_data="cancel_game")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     start_message = f"""
-🎮 새로운 바둑이 게임이 시작되었습니다!
+🎮 새로운 바둑이 게임 모집 중!
 
 👤 게임 호스트: {user.first_name}
-👥 현재 참가자: 0명
-🎯 필요 인원: 2~4명
+👥 현재 참가자: 0/4명 
+🎯 필요 인원: 최소 2명
 
-⏰ 2분 내에 참가자를 모집합니다.
-참가하려면 아래 버튼을 클릭하세요!
+💡 참가하려면 아래 "게임 참가하기" 버튼을 클릭하세요!
+⏰ 다른 사람들도 이 메시지에서 바로 참가할 수 있습니다.
     """
     
     await update.message.reply_text(start_message, reply_markup=reply_markup)
@@ -245,7 +245,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "join_game":
         if user.id in game.players:
-            await query.edit_message_text("❌ 이미 게임에 참가하셨습니다!")
+            await query.answer("❌ 이미 게임에 참가하셨습니다!", show_alert=True)
+            return
+        
+        if len(game.players) >= 4:
+            await query.answer("❌ 게임이 가득 참! (최대 4명)", show_alert=True)
             return
         
         # 플레이어 추가
@@ -258,15 +262,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_count = len(game.players)
         player_names = [game.players[pid]['name'] for pid in game.players]
         
-        if player_count >= 2:
+        # 항상 참가 버튼 유지 (최대 4명까지)
+        if player_count >= 4:
+            keyboard = [
+                [InlineKeyboardButton("🎮 게임 시작 (4명 풀방)", callback_data="start_game")],
+                [InlineKeyboardButton("❌ 게임 취소", callback_data="cancel_game")]
+            ]
+        elif player_count >= 2:
             keyboard = [
                 [InlineKeyboardButton("🎮 게임 시작", callback_data="start_game")],
-                [InlineKeyboardButton("🔄 더 기다리기", callback_data="wait_more")],
+                [InlineKeyboardButton("➕ 더 참가하기", callback_data="join_game")],
                 [InlineKeyboardButton("❌ 게임 취소", callback_data="cancel_game")]
             ]
         else:
             keyboard = [
-                [InlineKeyboardButton("🔄 참가자 대기 중...", callback_data="waiting")],
+                [InlineKeyboardButton("➕ 게임 참가하기", callback_data="join_game")],
                 [InlineKeyboardButton("❌ 게임 취소", callback_data="cancel_game")]
             ]
         
@@ -275,10 +285,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         updated_message = f"""
 🎮 바둑이 게임 대기실
 
-👥 참가자 ({player_count}명):
+👥 현재 참가자 ({player_count}/4명):
 {', '.join(player_names)}
 
-{"🎯 게임 시작 가능!" if player_count >= 2 else "⏰ 최소 2명이 필요합니다."}
+💡 {f"게임 시작 가능! (2명 이상)" if player_count >= 2 else "최소 2명이 필요합니다."}
+🔄 다른 사람들도 아래 버튼으로 참가할 수 있습니다!
         """
         
         await query.edit_message_text(updated_message, reply_markup=reply_markup)
@@ -329,6 +340,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game.game_active = False
         game.players.clear()
         await query.edit_message_text("❌ 게임이 취소되었습니다.")
+    
+    elif query.data == "waiting" or query.data == "wait_more":
+        await query.answer("다른 플레이어를 기다리는 중입니다... 🕐", show_alert=False)
 
 def main():
     """메인 함수"""
