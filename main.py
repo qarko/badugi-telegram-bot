@@ -109,6 +109,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📋 게임 명령어:
 /game_start - 새 게임 시작
+/game_stop - 게임 강제 종료
+/game_status - 현재 게임 상태 확인
+/game_reset - 게임 완전 리셋
+
+🃏 기타 명령어:
 /test_hand - 테스트 카드 받기
 /rules - 게임 룰 설명
 /help - 도움말
@@ -130,11 +135,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 4️⃣써드: 2장만 유효 (2장 중복)
 5️⃣ 베이스: 1장만 유효 (3장 중복)
 
-🎮 게임 방법:
+🎮 게임 명령어:
+/game_start - 새 게임 시작
+/game_stop - 게임 강제 종료
+/game_status - 현재 상태 확인
+/game_reset - 완전 리셋
+
+🔧 게임 방법:
 1. /game_start로 게임 시작
-2. 카드 4장 받기
-3. 족보 확인하기
-4. (향후) 베팅하고 카드 교환하기
+2. 참가 버튼으로 참여
+3. 2명 이상 모이면 게임 시작
+4. 개인 메시지로 카드 확인
 
 💡 팁: 낮은 숫자일수록 좋습니다!
     """
@@ -171,7 +182,74 @@ A♠2♣3♦4♥ (골프 바둑이) > A♠2♣3♦5♥ (메이드)
     """
     await update.message.reply_text(rules_text)
 
-async def test_hand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def game_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """게임 강제 종료"""
+    user = update.effective_user
+    
+    if not game.game_active and not game.players:
+        await update.message.reply_text("❌ 현재 진행 중인 게임이 없습니다.")
+        return
+    
+    # 게임 초기화
+    game.game_active = False
+    game.players.clear()
+    
+    stop_message = f"""
+🛑 게임이 강제 종료되었습니다.
+
+👤 종료 요청자: {user.first_name}
+🔄 새 게임을 시작하려면 /game_start 명령어를 사용하세요.
+    """
+    
+    await update.message.reply_text(stop_message)
+
+async def game_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """현재 게임 상태 확인"""
+    
+    if not game.game_active and not game.players:
+        status_message = """
+📊 게임 상태: 대기 중
+
+🎮 현재 진행 중인 게임이 없습니다.
+🚀 새 게임을 시작하려면 /game_start 명령어를 사용하세요.
+        """
+    else:
+        player_names = [game.players[pid]['name'] for pid in game.players]
+        status_message = f"""
+📊 게임 상태: {"진행 중" if game.game_active else "모집 중"}
+
+👥 참가자 ({len(game.players)}명):
+{', '.join(player_names) if player_names else '없음'}
+
+🛠️ 관리 명령어:
+/game_stop - 게임 강제 종료
+/game_status - 현재 상태 확인
+        """
+    
+    await update.message.reply_text(status_message)
+
+async def game_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """게임 완전 리셋 (관리자용)"""
+    user = update.effective_user
+    
+    # 모든 게임 데이터 초기화
+    game.game_active = False
+    game.players.clear()
+    game.deck.clear()
+    
+    reset_message = f"""
+🔄 게임이 완전히 리셋되었습니다.
+
+👤 리셋 요청자: {user.first_name}
+🧹 모든 게임 데이터가 초기화되었습니다.
+
+🎮 게임 명령어:
+/game_start - 새 게임 시작
+/game_status - 게임 상태 확인
+/game_stop - 게임 종료
+    """
+    
+    await update.message.reply_text(reset_message)
     """테스트용 카드 받기"""
     user = update.effective_user
     
@@ -299,7 +377,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ 최소 2명이 필요합니다!")
             return
         
-        # 실제 게임 시작
+        # 개인 메시지 가능 여부 사전 체크
+        failed_players = []
+        for player_id in game.players:
+            try:
+                await context.bot.send_message(
+                    chat_id=player_id, 
+                    text="🔄 개인 메시지 테스트 중..."
+                )
+            except Exception as e:
+                failed_players.append(game.players[player_id]['name'])
+                logger.error(f"개인 메시지 전송 실패 ({player_id}): {e}")
+        
+        # 개인 메시지 실패한 플레이어가 있으면 경고
+        if failed_players:
+            warning_message = f"""
+⚠️ 개인 메시지 전송 실패!
+
+❌ 다음 플레이어들이 봇과 개인 대화를 시작해야 합니다:
+{', '.join(failed_players)}
+
+📱 해결 방법:
+1. 텔레그램에서 이 봇을 검색
+2. "START" 버튼 클릭 또는 /start 전송
+3. 모든 참가자가 완료 후 다시 게임 시작
+
+🔄 또는 아래 "공개 게임" 버튼으로 그룹에서 진행
+            """
+            
+            keyboard = [
+                [InlineKeyboardButton("🎮 다시 게임 시작", callback_data="start_game")],
+                [InlineKeyboardButton("🌐 공개 게임 (그룹에서)", callback_data="public_game")],
+                [InlineKeyboardButton("❌ 게임 취소", callback_data="cancel_game")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(warning_message, reply_markup=reply_markup)
+            return
+        
+        # 모든 플레이어 개인 메시지 가능 - 게임 시작
         player_hands = game.deal_cards(len(game.players))
         player_ids = list(game.players.keys())
         
@@ -336,6 +452,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"개인 메시지 전송 실패: {e}")
     
+    elif query.data == "public_game":
+        # 그룹에서 공개로 게임 진행
+        if len(game.players) < 2:
+            await query.edit_message_text("❌ 최소 2명이 필요합니다!")
+            return
+            
+        player_hands = game.deal_cards(len(game.players))
+        player_ids = list(game.players.keys())
+        
+        # 각 플레이어에게 카드 할당
+        for i, player_id in enumerate(player_ids):
+            game.players[player_id]['hand'] = player_hands[i]
+        
+        # 공개 게임 결과 메시지
+        result_message = "🎮 공개 바둑이 게임 결과:\n\n"
+        
+        for player_id in game.players:
+            hand = game.players[player_id]['hand']
+            hand_type, rank_value, valid_cards = game.evaluate_hand(hand)
+            cards_text = " ".join(str(card) for card in hand)
+            
+            result_message += f"""
+👤 {game.players[player_id]['name']}:
+🃏 카드: {cards_text}
+🎯 족보: {hand_type}
+📊 점수: {rank_value:.1f}
+
+"""
+        
+        # 승자 결정 (가장 낮은 점수)
+        winner_id = min(game.players.keys(), 
+                       key=lambda pid: game.evaluate_hand(game.players[pid]['hand'])[1])
+        winner_name = game.players[winner_id]['name']
+        
+        result_message += f"🏆 승자: {winner_name}님!"
+        
+        await query.edit_message_text(result_message)
+    
     elif query.data == "cancel_game":
         game.game_active = False
         game.players.clear()
@@ -360,6 +514,9 @@ def main():
     application.add_handler(CommandHandler("rules", rules))
     application.add_handler(CommandHandler("test_hand", test_hand))
     application.add_handler(CommandHandler("game_start", game_start))
+    application.add_handler(CommandHandler("game_stop", game_stop))
+    application.add_handler(CommandHandler("game_status", game_status))
+    application.add_handler(CommandHandler("game_reset", game_reset))
     
     # 버튼 핸들러 등록
     application.add_handler(CallbackQueryHandler(button_handler))
