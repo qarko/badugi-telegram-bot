@@ -56,6 +56,7 @@ class BadugiGame:
         self.exchange_round = 0
         self.selected_cards = {}  # user_id: [selected_indices]
         self.exchange_completed = set()  # user_id who completed exchange
+        self.betting_completed = set()  # user_id who completed betting
         
     def create_deck(self):
         """새로운 덱 생성"""
@@ -152,9 +153,18 @@ class BadugiGame:
         if len(active_players) <= 1:
             return True
         
-        # 모든 active 플레이어가 같은 금액을 베팅했는지 확인
-        bets = [self.round_bets.get(pid, 0) for pid in active_players]
-        return len(set(bets)) <= 1 and all(bet >= self.current_bet for bet in bets)
+        # 모든 active 플레이어가 베팅을 완료했는지 확인
+        for player_id in active_players:
+            if player_id not in self.betting_completed:
+                return False
+        
+        # 모든 플레이어가 같은 금액을 베팅했는지 확인 (폴드한 플레이어 제외)
+        betting_amounts = []
+        for player_id in active_players:
+            if player_id not in self.folded_players:
+                betting_amounts.append(self.round_bets.get(player_id, 0))
+        
+        return len(set(betting_amounts)) <= 1
     
     def is_exchange_complete(self):
         """카드 교환 라운드 완료 확인"""
@@ -206,15 +216,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 게임 진행:
 1. /game_start로 게임 시작
 2. 참가 버튼으로 참여 (2~4명)
-3. 카드 4장 받기
-4. 베팅 → 카드교환 → 베팅 (3라운드)
-5. 최종 베팅 후 승부 결정
+3. 💰 참가비 500칩 자동 차감
+4. 카드 4장 받기
+5. 베팅 → 카드교환 → 베팅 (3라운드)
+6. 최종 베팅 후 승부 결정
 
 💰 베팅 액션:
 • 체크: 베팅하지 않고 넘기기
 • 콜: 상대방과 같은 금액 베팅
 • 레이즈: 더 많은 금액 베팅
-• 폴드: 게임 포기
+• 올인: 모든 칩 베팅
+• 🚪 다이: 게임 포기 (언제든지 가능)
 
 🔄 카드 교환:
 • 라운드마다 0~4장 교환 가능
@@ -231,6 +243,11 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎯 목표: 4장의 카드로 가장 좋은 족보 만들기
 
+💰 게임 시작:
+• 참가비(앤티): 500칩 자동 차감
+• 모든 플레이어가 참가비를 내고 시작
+• 참가비가 초기 팟머니가 됨
+
 🎮 게임 진행 순서:
 1️⃣ 카드 4장 딜링
 2️⃣ 1차 베팅 라운드
@@ -244,8 +261,9 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💰 베팅 시스템:
 • 시작 칩: 10,000개
-• 기본 베팅: 100칩
-• 최대 베팅: 1,000칩
+• 참가비: 500칩 (자동 차감)
+• 기본 레이즈: 100칩, 500칩, 1000칩
+• 🚪 다이: 언제든지 게임 포기 가능
 • 팟머니는 승자가 가져감
 
 🔄 카드 교환:
@@ -257,6 +275,12 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. 족보 종류 (메이드 > 세컨 > 써드 > 베이스)
 2. 같은 족보면 낮은 숫자가 승리
 3. 마지막까지 남은 플레이어가 승리
+
+💡 전략 팁:
+• A(에이스)가 가장 좋은 카드
+• 무늬와 숫자가 겹치지 않게 관리
+• 상대방의 베팅 패턴 관찰
+• 다이 타이밍이 중요함
     """
     await update.message.reply_text(rules_text)
 
@@ -320,10 +344,13 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 게임 호스트: {user.first_name}
 👥 현재 참가자: 0/4명 
 🎯 필요 인원: 최소 2명
-💰 시작 칩: 10,000개
+💰 참가비: 500칩 (자동 차감)
+🏆 시작 칩: 10,000개
 
 💡 참가하려면 "게임 참가하기" 버튼을 클릭하세요!
-🔥 완전한 바둑이: 베팅 + 카드교환 + 승부!
+🔥 완전한 바둑이: 앤티 + 베팅 + 카드교환 + 다이!
+
+⚠️ 모든 플레이어가 500칩 이상 보유해야 합니다.
     """
     
     await update.message.reply_text(start_message, reply_markup=reply_markup)
@@ -342,6 +369,9 @@ async def game_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.current_state = GAME_STATES['WAITING']
     game.folded_players.clear()
     game.pot = 0
+    game.betting_completed.clear()
+    game.exchange_completed.clear()
+    game.selected_cards.clear()
     
     stop_message = f"""
 🛑 게임이 강제 종료되었습니다.
@@ -402,6 +432,7 @@ async def game_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.chat_id = None
     game.selected_cards.clear()
     game.exchange_completed.clear()
+    game.betting_completed.clear()
     
     reset_message = f"""
 🔄 게임이 완전히 리셋되었습니다.
@@ -540,6 +571,38 @@ async def start_badugi_game(query, context):
     game.reset_round_bets()
     game.folded_players.clear()
     
+    # 앤티(참가비) 500칩 징수
+    ante_amount = 500
+    insufficient_players = []
+    
+    for player_id in game.players:
+        player = game.players[player_id]
+        if player['chips'] >= ante_amount:
+            player['chips'] -= ante_amount
+            game.pot += ante_amount
+        else:
+            insufficient_players.append(player['name'])
+    
+    # 칩 부족한 플레이어가 있으면 게임 취소
+    if insufficient_players:
+        error_message = f"""
+❌ 참가비 부족으로 게임을 시작할 수 없습니다!
+
+💰 참가비: {ante_amount}칩
+❌ 칩 부족 플레이어: {', '.join(insufficient_players)}
+
+💡 모든 플레이어가 최소 {ante_amount}칩 이상 보유해야 합니다.
+        """
+        await query.edit_message_text(error_message)
+        
+        # 이미 차감한 칩 되돌리기
+        for player_id in game.players:
+            player = game.players[player_id]
+            if player['name'] not in insufficient_players:
+                player['chips'] += ante_amount
+        game.pot = 0
+        return
+    
     # 카드 딜링
     player_hands = game.deal_cards(len(game.players))
     player_ids = list(game.players.keys())
@@ -548,8 +611,18 @@ async def start_badugi_game(query, context):
     for i, player_id in enumerate(player_ids):
         game.players[player_id]['hand'] = player_hands[i]
     
-    # 게임 시작 알림
-    await query.edit_message_text("🎮 바둑이 게임이 시작되었습니다! 1차 베팅 라운드를 시작합니다.")
+    # 게임 시작 알림 (앤티 정보 포함)
+    ante_message = f"""
+🎮 바둑이 게임이 시작되었습니다!
+
+💰 참가비 징수 완료:
+- 각자 {ante_amount}칩 차감
+- 초기 팟머니: {game.pot:,}칩
+
+🃏 카드가 딜링되었습니다. 1차 베팅 라운드를 시작합니다!
+    """
+    
+    await query.edit_message_text(ante_message)
     
     # 각 플레이어에게 개인 메시지로 카드 전송
     for player_id in game.players:
@@ -601,32 +674,41 @@ async def send_player_status(context, player_id):
 async def get_betting_keyboard(player_id):
     """베팅 액션 키보드"""
     player = game.players[player_id]
-    current_bet_diff = game.current_bet - game.round_bets.get(player_id, 0)
+    current_player_bet = game.round_bets.get(player_id, 0)
+    call_amount = max(0, game.current_bet - current_player_bet)
     
     keyboard = []
     
     # 체크/콜
-    if current_bet_diff == 0:
+    if call_amount == 0:
         keyboard.append([InlineKeyboardButton("✅ 체크", callback_data="bet_check")])
     else:
-        keyboard.append([InlineKeyboardButton(f"📞 콜 ({current_bet_diff}칩)", callback_data="bet_call")])
+        if player['chips'] >= call_amount:
+            keyboard.append([InlineKeyboardButton(f"📞 콜 ({call_amount:,}칩)", callback_data="bet_call")])
+        else:
+            keyboard.append([InlineKeyboardButton("❌ 콜 불가 (칩부족)", callback_data="bet_insufficient")])
     
     # 레이즈 옵션들
-    if player['chips'] >= current_bet_diff + 100:
-        keyboard.append([
-            InlineKeyboardButton("⬆️ 레이즈 100", callback_data="bet_raise_100"),
-            InlineKeyboardButton("⬆️ 레이즈 500", callback_data="bet_raise_500")
-        ])
+    raise_buttons = []
+    for raise_amount in [100, 500, 1000]:
+        total_needed = call_amount + raise_amount
+        if player['chips'] >= total_needed:
+            raise_buttons.append(InlineKeyboardButton(f"⬆️ +{raise_amount}", callback_data=f"bet_raise_{raise_amount}"))
     
-    if player['chips'] >= current_bet_diff + 1000:
-        keyboard.append([InlineKeyboardButton("🔥 레이즈 1000", callback_data="bet_raise_1000")])
+    if raise_buttons:
+        # 2개씩 나누어서 배치
+        for i in range(0, len(raise_buttons), 2):
+            keyboard.append(raise_buttons[i:i+2])
     
     # 올인
-    if player['chips'] > current_bet_diff:
-        keyboard.append([InlineKeyboardButton("💥 올인", callback_data="bet_allin")])
+    if player['chips'] > call_amount:
+        remaining_chips = player['chips'] - call_amount
+        keyboard.append([InlineKeyboardButton(f"💥 올인 (+{remaining_chips:,}칩)", callback_data="bet_allin")])
+    elif player['chips'] == call_amount and call_amount > 0:
+        keyboard.append([InlineKeyboardButton(f"💥 올인 (콜)", callback_data="bet_allin")])
     
-    # 폴드
-    keyboard.append([InlineKeyboardButton("❌ 폴드", callback_data="bet_fold")])
+    # 다이 (폴드)
+    keyboard.append([InlineKeyboardButton("🚪 다이", callback_data="bet_die")])
     
     return keyboard
 
@@ -656,67 +738,162 @@ async def get_exchange_keyboard(player_id):
 
 async def handle_betting(query, user, context):
     """베팅 액션 처리"""
-    if game.get_current_player_id() != user.id:
-        await query.answer("❌ 당신의 턴이 아닙니다!", show_alert=True)
+    if not game.current_state.startswith('betting'):
+        await query.answer("❌ 지금은 베팅 시간이 아닙니다!", show_alert=True)
         return
-    
+        
+    if user.id in game.folded_players:
+        await query.answer("❌ 이미 다이하셨습니다!", show_alert=True)
+        return
+        
+    if user.id in game.betting_completed:
+        await query.answer("❌ 이미 베팅을 완료하셨습니다!", show_alert=True)
+        return
+
     action = query.data.split("_")[1]
     player = game.players[user.id]
+    current_player_bet = game.round_bets.get(user.id, 0)
+    
+    bet_success = False
+    action_message = ""
     
     if action == "check":
-        await query.answer("✅ 체크했습니다.")
-        
+        if game.current_bet == current_player_bet:
+            action_message = "✅ 체크했습니다."
+            bet_success = True
+        else:
+            await query.answer("❌ 베팅이 있어서 체크할 수 없습니다. 콜하거나 다이하세요!", show_alert=True)
+            return
+            
     elif action == "call":
-        call_amount = game.current_bet - game.round_bets.get(user.id, 0)
+        call_amount = game.current_bet - current_player_bet
+        if call_amount <= 0:
+            await query.answer("❌ 콜할 베팅이 없습니다. 체크하세요!", show_alert=True)
+            return
         if player['chips'] >= call_amount:
             player['chips'] -= call_amount
             game.round_bets[user.id] = game.current_bet
             game.pot += call_amount
-            await query.answer(f"📞 {call_amount}칩 콜했습니다.")
+            action_message = f"📞 {call_amount:,}칩 콜했습니다."
+            bet_success = True
         else:
             await query.answer("❌ 칩이 부족합니다!", show_alert=True)
             return
             
     elif action.startswith("raise"):
         raise_amount = int(action.split("_")[1])
-        total_bet = game.current_bet + raise_amount
-        bet_diff = total_bet - game.round_bets.get(user.id, 0)
+        new_bet = game.current_bet + raise_amount
+        bet_diff = new_bet - current_player_bet
         
         if player['chips'] >= bet_diff:
             player['chips'] -= bet_diff
-            game.round_bets[user.id] = total_bet
-            game.current_bet = total_bet
+            game.round_bets[user.id] = new_bet
+            game.current_bet = new_bet
             game.pot += bet_diff
-            await query.answer(f"⬆️ {raise_amount}칩 레이즈했습니다.")
+            action_message = f"⬆️ {raise_amount:,}칩 레이즈했습니다. (총 베팅: {new_bet:,}칩)"
+            bet_success = True
+            
+            # 레이즈 시 다른 플레이어들의 베팅 완료 상태 초기화 (본인 제외)
+            game.betting_completed.clear()
         else:
             await query.answer("❌ 칩이 부족합니다!", show_alert=True)
             return
             
     elif action == "allin":
         all_chips = player['chips']
-        total_bet = game.round_bets.get(user.id, 0) + all_chips
+        if all_chips <= 0:
+            await query.answer("❌ 올인할 칩이 없습니다!", show_alert=True)
+            return
+            
+        total_bet = current_player_bet + all_chips
         player['chips'] = 0
         game.round_bets[user.id] = total_bet
+        
         if total_bet > game.current_bet:
             game.current_bet = total_bet
+            # 올인으로 레이즈된 경우 다른 플레이어들의 베팅 완료 상태 초기화
+            game.betting_completed.clear()
+            
         game.pot += all_chips
-        await query.answer(f"💥 {all_chips}칩 올인했습니다!")
+        action_message = f"💥 {all_chips:,}칩 올인했습니다! (총 베팅: {total_bet:,}칩)"
+        bet_success = True
         
-    elif action == "fold":
+    elif action == "fold" or action == "die":
         game.folded_players.add(user.id)
-        await query.answer("❌ 폴드했습니다.")
+        action_message = "🚪 다이했습니다. (게임 포기)"
+        bet_success = True
     
-    # 다음 플레이어로 턴 이동
-    game.next_player()
+    elif action == "insufficient":
+        await query.answer("❌ 칩이 부족해서 콜할 수 없습니다!", show_alert=True)
+        return
     
-    # 베팅 라운드 완료 확인
-    if game.is_betting_complete():
-        await advance_game_state(query, context)
-    else:
-        # 다음 플레이어에게 알림
-        next_player_id = game.get_current_player_id()
-        if next_player_id:
-            await send_player_status(context, next_player_id)
+    if bet_success:
+        # 베팅 완료 표시
+        game.betting_completed.add(user.id)
+        
+        # 결과 메시지 업데이트
+        player = game.players[user.id]
+        result_message = f"""
+{action_message}
+
+💰 현재 상황:
+- 보유 칩: {player['chips']:,}개
+- 이번 라운드 베팅: {game.round_bets.get(user.id, 0):,}칩
+- 현재 팟머니: {game.pot:,}칩
+- 현재 최고 베팅: {game.current_bet:,}칩
+
+✅ 액션이 완료되었습니다. 다른 플레이어를 기다리는 중...
+        """
+        
+        await query.edit_message_text(result_message)
+        
+        # 다이한 플레이어가 있으면 그룹에 알림
+        if action == "fold" or action == "die":
+            await context.bot.send_message(
+                chat_id=game.chat_id,
+                text=f"🚪 {player['name']}님이 다이했습니다."
+            )
+        
+        # 베팅 라운드 완료 확인
+        if game.is_betting_complete():
+            # 그룹 채팅에 라운드 완료 알림
+            active_players = game.get_active_players()
+            await context.bot.send_message(
+                chat_id=game.chat_id,
+                text=f"💰 베팅 라운드 완료! 총 팟머니: {game.pot:,}칩 (남은 플레이어: {len(active_players)}명)"
+            )
+            await advance_game_state(query, context)
+        else:
+            # 아직 베팅하지 않은 플레이어들에게 알림
+            active_players = game.get_active_players()
+            for player_id in active_players:
+                if player_id not in game.betting_completed and player_id not in game.folded_players:
+                    await send_betting_status(context, player_id)
+
+async def send_betting_status(context, player_id):
+    """플레이어에게 베팅 상태 전송"""
+    player = game.players[player_id]
+    current_player_bet = game.round_bets.get(player_id, 0)
+    call_amount = max(0, game.current_bet - current_player_bet)
+    
+    message = f"""
+🎰 {player['name']}님의 베팅 턴:
+
+💰 현재 상황:
+- 보유 칩: {player['chips']:,}개
+- 이번 라운드 베팅: {current_player_bet:,}칩
+- 현재 팟머니: {game.pot:,}칩
+- 현재 최고 베팅: {game.current_bet:,}칩
+- 콜하려면: {call_amount:,}칩
+
+🎯 액션을 선택하세요:
+💡 카드가 마음에 들지 않으면 언제든지 다이할 수 있습니다.
+    """
+    
+    keyboard = await get_betting_keyboard(player_id)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(chat_id=player_id, text=message, reply_markup=reply_markup)
 
 async def handle_card_exchange(query, user, context):
     """카드 교환 처리"""
@@ -881,10 +1058,11 @@ async def start_betting_round(context, round_name):
         text=f"🎰 {round_name} 시작!\n💰 현재 팟머니: {game.pot:,}칩"
     )
     
-    # 첫 번째 플레이어에게 턴 알림
-    current_player_id = game.get_current_player_id()
-    if current_player_id:
-        await send_player_status(context, current_player_id)
+    # 모든 active 플레이어에게 동시에 베팅 메시지 전송
+    active_players = game.get_active_players()
+    for player_id in active_players:
+        if player_id not in game.folded_players:
+            await send_betting_status(context, player_id)
 
 async def send_exchange_status(context, player_id):
     """플레이어에게 카드 교환 상태 전송"""
