@@ -228,6 +228,40 @@ async def game_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message)
 
+async def test_hand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """테스트용 카드 받기"""
+    user = update.effective_user
+    
+    # 새 덱 생성하고 카드 4장 딜링
+    game.create_deck()
+    hand = game.deal_cards(1)[0]  # 1명에게 카드 4장
+    
+    # 족보 판정
+    hand_type, rank_value, valid_cards = game.evaluate_hand(hand)
+    
+    # 카드 시각화
+    cards_text = " ".join(str(card) for card in hand)
+    valid_cards_text = " ".join(str(card) for card in valid_cards)
+    
+    result_message = f"""
+🃏 {user.first_name}님의 테스트 카드:
+
+📇 받은 카드: {cards_text}
+🎯 족보: {hand_type}
+✨ 유효 카드: {valid_cards_text}
+📊 점수: {rank_value:.1f} (낮을수록 좋음)
+
+💡 족보 설명:
+• 메이드: 무늬와 숫자 모두 4개 다름 ✨
+• 세컨드: 3장만 유효
+• 써드: 2장만 유효
+• 베이스: 1장만 유효
+
+🎮 다시 받으려면 /test_hand 명령어를 사용하세요!
+    """
+    
+    await update.message.reply_text(result_message)
+
 async def game_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """게임 완전 리셋 (관리자용)"""
     user = update.effective_user
