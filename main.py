@@ -54,6 +54,8 @@ class BadugiGame:
         self.folded_players = set()
         self.chat_id = None
         self.exchange_round = 0
+        self.selected_cards = {}  # user_id: [selected_indices]
+        self.exchange_completed = set()  # user_id who completed exchange
         
     def create_deck(self):
         """새로운 덱 생성"""
@@ -153,6 +155,17 @@ class BadugiGame:
         # 모든 active 플레이어가 같은 금액을 베팅했는지 확인
         bets = [self.round_bets.get(pid, 0) for pid in active_players]
         return len(set(bets)) <= 1 and all(bet >= self.current_bet for bet in bets)
+    
+    def is_exchange_complete(self):
+        """카드 교환 라운드 완료 확인"""
+        active_players = self.get_active_players()
+        return len(self.exchange_completed) >= len(active_players)
+    
+    def reset_exchange_round(self):
+        """교환 라운드 초기화"""
+        self.selected_cards.clear()
+        self.exchange_completed.clear()
+        self.current_player_index = 0
 
 # 전역 게임 인스턴스
 game = BadugiGame()
@@ -387,6 +400,8 @@ async def game_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.round_bets.clear()
     game.folded_players.clear()
     game.chat_id = None
+    game.selected_cards.clear()
+    game.exchange_completed.clear()
     
     reset_message = f"""
 🔄 게임이 완전히 리셋되었습니다.
@@ -617,15 +632,23 @@ async def get_betting_keyboard(player_id):
 
 async def get_exchange_keyboard(player_id):
     """카드 교환 키보드"""
+    selected = game.selected_cards.get(player_id, [])
+    player = game.players[player_id]
+    
+    # 카드별 버튼 (선택된 카드는 ✅ 표시)
+    card_buttons = []
+    for i in range(4):
+        card = player['hand'][i]
+        if i in selected:
+            card_buttons.append(InlineKeyboardButton(f"✅ {i+1}번({card})", callback_data=f"exchange_toggle_{i}"))
+        else:
+            card_buttons.append(InlineKeyboardButton(f"◻️ {i+1}번({card})", callback_data=f"exchange_toggle_{i}"))
+    
     keyboard = [
+        card_buttons[:2],  # 1,2번 카드
+        card_buttons[2:],  # 3,4번 카드
         [
-            InlineKeyboardButton("1️⃣", callback_data="exchange_toggle_0"),
-            InlineKeyboardButton("2️⃣", callback_data="exchange_toggle_1"),
-            InlineKeyboardButton("3️⃣", callback_data="exchange_toggle_2"),
-            InlineKeyboardButton("4️⃣", callback_data="exchange_toggle_3")
-        ],
-        [
-            InlineKeyboardButton("🔄 선택한 카드 교환", callback_data="exchange_confirm"),
+            InlineKeyboardButton(f"🔄 선택한 {len(selected)}장 교환", callback_data="exchange_confirm"),
             InlineKeyboardButton("⏭️ 교환 안함 (스테이)", callback_data="exchange_skip")
         ]
     ]
@@ -697,46 +720,112 @@ async def handle_betting(query, user, context):
 
 async def handle_card_exchange(query, user, context):
     """카드 교환 처리"""
-    if game.get_current_player_id() != user.id:
-        await query.answer("❌ 당신의 턴이 아닙니다!", show_alert=True)
+    if not game.current_state.startswith('exchange'):
+        await query.answer("❌ 지금은 카드 교환 시간이 아닙니다!", show_alert=True)
+        return
+    
+    if user.id in game.folded_players:
+        await query.answer("❌ 폴드한 플레이어는 교환할 수 없습니다!", show_alert=True)
         return
     
     action_parts = query.data.split("_")
     action = action_parts[1]
     
     if action == "toggle":
-        # 카드 선택/해제 토글 (실제 구현에서는 선택 상태 저장 필요)
+        # 카드 선택/해제 토글
         card_index = int(action_parts[2])
-        await query.answer(f"{card_index + 1}번 카드 선택 토글")
+        
+        if user.id not in game.selected_cards:
+            game.selected_cards[user.id] = []
+        
+        selected = game.selected_cards[user.id]
+        
+        if card_index in selected:
+            selected.remove(card_index)
+            await query.answer(f"◻️ {card_index + 1}번 카드 선택 해제")
+        else:
+            selected.append(card_index)
+            await query.answer(f"✅ {card_index + 1}번 카드 선택")
+        
+        # 키보드 업데이트
+        keyboard = await get_exchange_keyboard(user.id)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # 메시지 내용도 업데이트
+        player = game.players[user.id]
+        hand = player['hand']
+        hand_type, rank_value, valid_cards = game.evaluate_hand(hand)
+        
+        cards_text = " ".join(str(card) for card in hand)
+        selected_cards_text = ", ".join([f"{i+1}번({hand[i]})" for i in selected]) if selected else "없음"
+        
+        message = f"""
+🃏 {player['name']}님의 카드 교환 ({game.exchange_round}차):
+
+📇 현재 카드: {cards_text}
+🎯 현재 족보: {hand_type} (점수: {rank_value:.1f})
+✅ 선택한 카드: {selected_cards_text}
+
+💡 교환할 카드를 선택하고 "교환" 버튼을 누르세요!
+📊 낮은 점수가 좋은 패입니다.
+        """
+        
+        await query.edit_message_text(message, reply_markup=reply_markup)
         
     elif action == "confirm":
-        # 실제 카드 교환 (간단 구현)
+        # 실제 카드 교환
+        if user.id not in game.selected_cards:
+            game.selected_cards[user.id] = []
+        
+        selected = game.selected_cards[user.id]
         player = game.players[user.id]
-        # 임시로 2장 교환하는 것으로 시뮬레이션
-        for i in range(2):
+        
+        if not selected:
+            await query.answer("❌ 교환할 카드를 선택해주세요!", show_alert=True)
+            return
+        
+        # 선택한 카드들을 새 카드로 교환
+        exchanged_cards = []
+        for card_index in sorted(selected, reverse=True):  # 뒤에서부터 교환
             if game.deck:
-                player['hand'][i] = game.deck.pop()
+                old_card = player['hand'][card_index]
+                new_card = game.deck.pop()
+                player['hand'][card_index] = new_card
+                exchanged_cards.append(f"{card_index+1}번: {old_card} → {new_card}")
         
-        await query.answer("🔄 카드를 교환했습니다!")
-        game.next_player()
+        game.exchange_completed.add(user.id)
         
+        # 교환 결과 메시지
+        exchange_result = "\n".join(exchanged_cards)
+        new_hand_type, new_rank_value, _ = game.evaluate_hand(player['hand'])
+        
+        result_message = f"""
+🔄 카드 교환 완료!
+
+🔀 교환된 카드:
+{exchange_result}
+
+🃏 새로운 카드: {" ".join(str(card) for card in player['hand'])}
+🎯 새로운 족보: {new_hand_type} (점수: {new_rank_value:.1f})
+
+✅ 교환이 완료되었습니다. 다른 플레이어를 기다리는 중...
+        """
+        
+        await query.edit_message_text(result_message)
+        
+        # 모든 플레이어 교환 완료 확인
         if game.is_exchange_complete():
             await advance_game_state(query, context)
-        else:
-            next_player_id = game.get_current_player_id()
-            if next_player_id:
-                await send_player_status(context, next_player_id)
                 
     elif action == "skip":
-        await query.answer("⏭️ 카드 교환을 건너뛰었습니다.")
-        game.next_player()
+        # 카드 교환 건너뛰기
+        game.exchange_completed.add(user.id)
         
+        await query.edit_message_text("⏭️ 카드 교환을 건너뛰었습니다. 다른 플레이어를 기다리는 중...")
+        
+        # 모든 플레이어 교환 완료 확인
         if game.is_exchange_complete():
             await advance_game_state(query, context)
-        else:
-            next_player_id = game.get_current_player_id()
-            if next_player_id:
-                await send_player_status(context, next_player_id)
 
 def is_exchange_complete():
     """카드 교환 라운드 완료 확인"""
@@ -748,7 +837,7 @@ async def advance_game_state(query, context):
     if game.current_state == GAME_STATES['BETTING_1']:
         game.current_state = GAME_STATES['EXCHANGE_1']
         game.exchange_round = 1
-        game.current_player_index = 0
+        game.reset_exchange_round()
         await start_exchange_round(context, "1차 카드 교환")
         
     elif game.current_state == GAME_STATES['EXCHANGE_1']:
@@ -760,7 +849,7 @@ async def advance_game_state(query, context):
     elif game.current_state == GAME_STATES['BETTING_2']:
         game.current_state = GAME_STATES['EXCHANGE_2']
         game.exchange_round = 2
-        game.current_player_index = 0
+        game.reset_exchange_round()
         await start_exchange_round(context, "2차 카드 교환")
         
     elif game.current_state == GAME_STATES['EXCHANGE_2']:
@@ -772,7 +861,7 @@ async def advance_game_state(query, context):
     elif game.current_state == GAME_STATES['BETTING_3']:
         game.current_state = GAME_STATES['EXCHANGE_3']
         game.exchange_round = 3
-        game.current_player_index = 0
+        game.reset_exchange_round()
         await start_exchange_round(context, "3차 카드 교환")
         
     elif game.current_state == GAME_STATES['EXCHANGE_3']:
@@ -797,6 +886,32 @@ async def start_betting_round(context, round_name):
     if current_player_id:
         await send_player_status(context, current_player_id)
 
+async def send_exchange_status(context, player_id):
+    """플레이어에게 카드 교환 상태 전송"""
+    player = game.players[player_id]
+    hand = player['hand']
+    hand_type, rank_value, valid_cards = game.evaluate_hand(hand)
+    
+    cards_text = " ".join(str(card) for card in hand)
+    selected = game.selected_cards.get(player_id, [])
+    selected_cards_text = ", ".join([f"{i+1}번({hand[i]})" for i in selected]) if selected else "없음"
+    
+    message = f"""
+🃏 {player['name']}님의 카드 교환 ({game.exchange_round}차):
+
+📇 현재 카드: {cards_text}
+🎯 현재 족보: {hand_type} (점수: {rank_value:.1f})
+✅ 선택한 카드: {selected_cards_text}
+
+💡 교환할 카드를 선택하고 "교환" 버튼을 누르세요!
+📊 낮은 점수가 좋은 패입니다.
+    """
+    
+    keyboard = await get_exchange_keyboard(player_id)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(chat_id=player_id, text=message, reply_markup=reply_markup)
+
 async def start_exchange_round(context, round_name):
     """카드 교환 라운드 시작"""
     # 그룹 채팅에 알림
@@ -805,10 +920,10 @@ async def start_exchange_round(context, round_name):
         text=f"🔄 {round_name} 시작!\n카드를 교환해서 더 좋은 패를 만드세요!"
     )
     
-    # 첫 번째 플레이어에게 턴 알림
-    current_player_id = game.get_current_player_id()
-    if current_player_id:
-        await send_player_status(context, current_player_id)
+    # 모든 active 플레이어에게 동시에 교환 메시지 전송
+    active_players = game.get_active_players()
+    for player_id in active_players:
+        await send_exchange_status(context, player_id)
 
 async def start_showdown(context):
     """최종 승부 및 결과 발표"""
@@ -901,4 +1016,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
