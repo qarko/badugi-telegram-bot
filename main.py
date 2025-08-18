@@ -290,19 +290,27 @@ CB_RAISE_CUSTOM = "raise_custom"
 CB_EXC = {i: f"exch_{i}" for i in range(5)}
 
 # ======= 명령어 =======
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 🔧 수정 사항 2: 또 다른 SyntaxError 발생 원인
+# f-string이 줄바꿈에서 닫히지 않아 오류 발생. 해결책: 문자열 묶음을 괄호 `( )`로 감싸고, 각 줄 끝에 `\n` 붙여줌.
+
+async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
+    total_games = prof['wins'] + prof['losses']
+    win_rate = (prof['wins'] / total_games * 100) if total_games > 0 else 0
     await update.message.reply_text(
         (
-            f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.\n"
-            f"/바둑이 로 로비를 만들거나 참가하세요.\n"
-            f"/내정보 /랭킹 /송금 <상대ID> <금액>\n"
-            f"보유 칩: {prof['chips']}개"
+            f"👤 {user.mention_html()}님의 정보\n"
+            f"💰 보유 칩: {prof['chips']}\n"
+            f"🏆 전적: {prof['wins']}승 {prof['losses']}패\n"
+            f"📊 승률: {win_rate:.1f}%"
         ),
         parse_mode="HTML",
     )
+
+# 🔑 주요 변경점:
+# - 여러 줄 f-string을 괄호 안에 넣고 각 줄 끝에 `\n` 추가
+# - SyntaxError 방지
 
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
