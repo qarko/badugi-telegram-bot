@@ -301,26 +301,28 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-# 🔧 cmd_start 함수 완전 재작성: f-string SyntaxError 재발 방지
-# 삼중 따옴표 f-string으로 확실하게 해결
+# 🔧 cmd_start 함수 최종 수정: f-string 오류 방지 위해 삼중따옴표 제거 + 괄호로 안전한 문자열 연결
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
 
-    message = f"""안녕하세요 {user.mention_html()}! 바둑이 봇입니다.
-/바둑이 로 로비를 만들거나 참가하세요.
-/내정보 /랭킹 /송금 <상대ID> <금액>
-보유 칩: {prof['chips']}개"""
+    message = (
+        f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.\n"
+        f"/바둑이 로 로비를 만들거나 참가하세요.\n"
+        f"/내정보 /랭킹 /송금 <상대ID> <금액>\n"
+        f"보유 칩: {prof['chips']}개"
+    )
 
     await update.message.reply_text(
         message,
         parse_mode="HTML",
     )
 
-# ✅ 삼중 따옴표 f-string으로 변경하여 줄바꿈 포함된 문자열을 안전하게 작성
-# ✅ SyntaxError 발생 원인(닫히지 않은 따옴표) 완전히 제거
+# ✅ 삼중 따옴표 대신 괄호 안에 여러 f-string을 나눠서 연결 → SyntaxError 발생 원천 차단
+# ✅ 각 줄 끝에 \n 추가하여 줄바꿈 유지
+
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await storage.top_rank(10)
