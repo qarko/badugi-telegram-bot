@@ -301,7 +301,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-# 🔧 cmd_start 함수 최종 수정: f-string 오류 방지 위해 삼중따옴표 제거 + 괄호로 안전한 문자열 연결
+# 🔧 cmd_start 함수 최종 재작성 (f-string 완전 제거)
+# f-string을 전혀 사용하지 않고 .format() 방식으로 처리 → SyntaxError 근본 차단
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -309,20 +310,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prof = await storage.get_profile(user.id)
 
     message = (
-        f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.\n"
-        f"/바둑이 로 로비를 만들거나 참가하세요.\n"
-        f"/내정보 /랭킹 /송금 <상대ID> <금액>\n"
-        f"보유 칩: {prof['chips']}개"
-    )
+        "안녕하세요 {}! 바둑이 봇입니다.\n"
+        "/바둑이 로 로비를 만들거나 참가하세요.\n"
+        "/내정보 /랭킹 /송금 <상대ID> <금액>\n"
+        "보유 칩: {}개"
+    ).format(user.mention_html(), prof['chips'])
 
     await update.message.reply_text(
         message,
         parse_mode="HTML",
     )
 
-# ✅ 삼중 따옴표 대신 괄호 안에 여러 f-string을 나눠서 연결 → SyntaxError 발생 원천 차단
-# ✅ 각 줄 끝에 \n 추가하여 줄바꿈 유지
-
+# ✅ f-string을 전혀 사용하지 않고 .format()으로 치환
+# ✅ SyntaxError: unterminated f-string literal 문제 완전히 제거
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await storage.top_rank(10)
