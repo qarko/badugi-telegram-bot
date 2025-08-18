@@ -295,13 +295,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
     await update.message.reply_text(
-        f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.
-"
-        f"/바둑이 로 로비를 만들거나 참가하세요. (예: /바둑이, /바둑이 500)
-"
-        f"/출석 (하루 1회 {CHECKIN_REWARD}칩), /내정보, /랭킹, /송금 <상대ID> <금액>",
+        (
+            f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.\n"
+            f"/바둑이 로 로비를 만들거나 참가하세요.\n"
+            f"/내정보 /랭킹 /송금 <상대ID> <금액>\n"
+            f"보유 칩: {prof['chips']}개"
+        ),
         parse_mode="HTML",
     )
+
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
