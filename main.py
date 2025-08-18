@@ -1,4 +1,4 @@
-# main.py (v6.2 - Fully Verified & Complete with Startup Fix)
+# main.py (v7.0 - Standard & Stable Startup)
 
 import os
 import logging
@@ -202,14 +202,16 @@ async def set_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # --- 6. 메인 실행 함수 ---
-async def main() -> None:
+def main() -> None:
     """봇을 시작하고 실행합니다."""
     if not all([TOKEN, MONGODB_URI, ADMIN_USER_ID]):
         logger.critical("필수 환경변수(BOT_TOKEN, MONGODB_URI, ADMIN_USER_ID)가 설정되지 않았습니다.")
         return
     
     application = Application.builder().token(TOKEN).build()
-
+    
+    # 오래된 업데이트 메시지를 청소하는 로직은 run_polling에 포함
+    
     # 명령어 핸들러 등록
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/바둑이$'), badugi_command))
@@ -219,16 +221,12 @@ async def main() -> None:
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/강제초기화$'), force_reset_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/관리자임명$'), set_admin_command))
 
-    # 봇 실행 (시작 시 오래된 메시지 자동 삭제 포함)
-    await application.run_polling(drop_pending_updates=True)
+    print("🤖 바둑이 게임봇 v7.0 (Stable Startup)이 시작되었습니다.")
+    
+    # 봇 실행 (라이브러리가 내부적으로 asyncio 루프를 관리)
+    application.run_polling(drop_pending_updates=True)
 
 
 # --- 7. 프로그램 시작점 ---
 if __name__ == "__main__":
-    print("🤖 바둑이 게임봇 v6.2 (Startup Fix) 시작 중...")
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("봇이 종료되었습니다.")
-    except Exception as e:
-        logger.critical(f"봇 실행 중 치명적인 오류 발생: {e}")
+    main()
