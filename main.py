@@ -301,26 +301,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 🔧 cmd_start 함수 완전 재작성: f-string SyntaxError 재발 방지
+# 삼중 따옴표 f-string으로 확실하게 해결
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
-    wins = prof.get("wins", 0)
-    games = prof.get("games", 0)
-    losses = max(0, games - wins)
-    wr = round(100.0 * wins / games, 1) if games > 0 else 0.0
+
+    message = f"""안녕하세요 {user.mention_html()}! 바둑이 봇입니다.
+/바둑이 로 로비를 만들거나 참가하세요.
+/내정보 /랭킹 /송금 <상대ID> <금액>
+보유 칩: {prof['chips']}개"""
+
     await update.message.reply_text(
-        (
-            f"👤 {user.mention_html()}
-"
-            f"칩: {prof['chips']}
-"
-            f"전적: {wins}승 {losses}패 / {games}판
-"
-            f"승률: {wr}%"
-        ),
+        message,
         parse_mode="HTML",
     )
+
+# ✅ 삼중 따옴표 f-string으로 변경하여 줄바꿈 포함된 문자열을 안전하게 작성
+# ✅ SyntaxError 발생 원인(닫히지 않은 따옴표) 완전히 제거
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await storage.top_rank(10)
