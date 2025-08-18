@@ -1,4 +1,4 @@
-# main.py (v6.0 - Fully Verified & Complete)
+# main.py (v6.2 - Fully Verified & Complete with Startup Fix)
 
 import os
 import logging
@@ -115,13 +115,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """사용자 정보 보기"""
     user = update.effective_user
     user_data = await get_user_data(user.id, user.first_name)
-    win_rate = (user_data.get('wins', 0) / user_data.get('total_games', 1) * 100)
+    total_games = user_data.get('total_games', 0)
+    wins = user_data.get('wins', 0)
+    win_rate = (wins / total_games * 100) if total_games > 0 else 0
     
     stats_text = (
         f"📊 **{user.first_name}님의 정보**\n\n"
         f"💰 보유 칩: {user_data.get('chips', 0):,}칩\n"
-        f"🎮 총 게임: {user_data.get('total_games', 0)}판\n"
-        f"🏆 승리: {user_data.get('wins', 0)}회\n"
+        f"🎮 총 게임: {total_games}판\n"
+        f"🏆 승리: {wins}회\n"
         f"📈 승률: {win_rate:.2f}%"
     )
     await update.message.reply_text(stats_text, parse_mode='Markdown')
@@ -223,8 +225,10 @@ async def main() -> None:
 
 # --- 7. 프로그램 시작점 ---
 if __name__ == "__main__":
-    print("🤖 바둑이 게임봇 v6.0 (Fully Verified) 시작 중...")
+    print("🤖 바둑이 게임봇 v6.2 (Startup Fix) 시작 중...")
     try:
         asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("봇이 종료되었습니다.")
     except Exception as e:
         logger.critical(f"봇 실행 중 치명적인 오류 발생: {e}")
