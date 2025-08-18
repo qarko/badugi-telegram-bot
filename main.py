@@ -1,16 +1,14 @@
-# main.py (v5.0 - 사이드팟 + 사용자 입력 레이즈 + DM 전용 인터랙션 + 출석 + 다중 스테이크 방 + 랜덤 칩 지급)
-# ✅ 반영 목록
-# - 관리자 체계: 최초 관리자(PRIMARY_ADMIN_ID=ADMIN_USER_ID)는 /관리자임명, /강제초기화 가능
-#                 임명된 관리자(보조)는 /강제초기화만 가능
-# - DM 전용 인터랙션: 패/액션 안내는 DM 우선(막히면 그룹/채널로 대체)
-# - 배팅: 콜/폴드/레이즈(프리셋 + 사용자 입력 + 올인). 사이드팟 지원.
-# - 라운드: 딜 → BET1 → EXC1 → BET2 → EXC2 → BET3(최종) → 쇼다운
-# - 교환: 0~4장 가능(개인 DM에서 선택)
-# - /출석: 하루 1회 1000칩 지급(기본). KST 기준.
-# - /바둑이 [min_or_preset]: 스테이크 방 생성.
-#     · 미지정(기본방): ante=10, min_chips=1000, join_bonus=50  (출석만으로도 플레이 가능)
-#     · 숫자 예: /바둑이 500 → min_chips=500, ante=25 (min/20 규칙), join_bonus=50
-# - 채팅 랜덤 칩 지급: 1~100칩, 낮은 확률/쿨다운으로 과도 지급 방지.
+# main.py (v5.1 - 안정화 리비전)
+# - f-string 줄바꿈 전부 괄호 결합/삼중따옴표 처리 → SyntaxError 방지
+# - 관리자 체계: 최초관리자(/관리자임명, /강제초기화), 임명관리자(/강제초기화)
+# - DM 우선 인터랙션(배팅/교환/패 안내). DM 불가 시 그룹으로 대체
+# - 레이즈: 프리셋(+RAISE_CHOICES), 사용자 입력, 올인 지원
+# - 사이드팟 지원(부분 콜/올인 정산). 쇼다운에서 팟별 분배
+# - 라운드: BET1→EXC1→BET2→EXC2→BET3(최종)
+# - 교환: 0~4장 (자동 버림 추천)
+# - /출석: KST 기준 하루 1회 +CHECKIN_REWARD 칩
+# - /바둑이 [min]: 스테이크(ante≈min/20, 기본 ante=ANTE_DEFAULT, min=MIN_CHIPS_DEFAULT, join_bonus=JOIN_BONUS)
+# - 랜덤 칩 지급: 그룹/채널 메시지에 낮은 확률 + 쿨다운
 
 import os
 import logging
@@ -36,14 +34,14 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest, Forbidden
 
-# ======= 로깅 =======
+# ===== 로깅 =====
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("badugi-bot")
 
-# ======= 환경변수 =======
+# ===== 환경변수 =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI")
 PRIMARY_ADMIN_ID = int(os.getenv("ADMIN_USER_ID", "0"))
@@ -58,20 +56,18 @@ MIN_CHIPS_DEFAULT = int(os.getenv("MIN_CHIPS_DEFAULT", "1000"))
 JOIN_BONUS = int(os.getenv("JOIN_BONUS", "50"))
 CHECKIN_REWARD = int(os.getenv("CHECKIN_REWARD", "1000"))
 
-# 랜덤 칩 지급 (채팅)
-GIVEAWAY_PROB = float(os.getenv("GIVEAWAY_PROB", "0.004"))  # 0.4%
+# 랜덤 칩 지급(그룹/채널)
+GIVEAWAY_PROB = float(os.getenv("GIVEAWAY_PROB", "0.004"))
 GIVEAWAY_MIN = int(os.getenv("GIVEAWAY_MIN", "1"))
 GIVEAWAY_MAX = int(os.getenv("GIVEAWAY_MAX", "100"))
 GIVEAWAY_USER_COOLDOWN_MIN = int(os.getenv("GIVEAWAY_USER_COOLDOWN_MIN", "30"))
 GIVEAWAY_CHAT_COOLDOWN_SEC = int(os.getenv("GIVEAWAY_CHAT_COOLDOWN_SEC", "90"))
 
-# 레이즈 프리셋(버튼)
 RAISE_CHOICES = [int(x) for x in os.getenv("RAISE_CHOICES", "10,20,50").split(",") if x.strip().isdigit()]
 
-# KST 타임존
 KST = timezone(timedelta(hours=9))
 
-# ======= DB (MongoDB 또는 인메모리) =======
+# ===== DB =====
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
 except Exception:
@@ -83,8 +79,8 @@ class Storage:
         self._mem_users: Dict[int, Dict[str, Any]] = {}
         self._mem_admins: Set[int] = set()
         self._mem_checkin: Dict[int, str] = {}
-        self._mem_last_giveaway_user: Dict[int, datetime] = {}
-        self._mem_last_giveaway_chat: Dict[int, datetime] = {}
+        self._mem_last_give_user: Dict[int, datetime] = {}
+        self._mem_last_give_chat: Dict[int, datetime] = {}
         if MONGODB_URI and AsyncIOMotorClient is not None:
             try:
                 self._client = AsyncIOMotorClient(MONGODB_URI)
@@ -148,7 +144,7 @@ class Storage:
         await self.add_chips(receiver, +amount)
         return True
 
-    # ===== 관리자 =====
+    # 관리자
     async def set_secondary_admin(self, target_id: int):
         if target_id == PRIMARY_ADMIN_ID:
             return
@@ -168,15 +164,14 @@ class Storage:
             return bool(doc and doc.get("secondary"))
         return user_id in self._mem_admins
 
-    # ===== 출석 =====
+    # 출석
     async def can_checkin(self, user_id: int) -> bool:
         today = datetime.now(KST).strftime("%Y-%m-%d")
         if self.is_db:
             doc = await self._db["checkin"].find_one({"_id": user_id})
             last = doc.get("last", "") if doc else ""
             return last != today
-        last = self._mem_checkin.get(user_id, "")
-        return last != today
+        return self._mem_checkin.get(user_id, "") != today
 
     async def mark_checkin(self, user_id: int):
         today = datetime.now(KST).strftime("%Y-%m-%d")
@@ -185,25 +180,25 @@ class Storage:
         else:
             self._mem_checkin[user_id] = today
 
-    # ===== 랜덤 칩 지급 쿨다운 =====
+    # 랜덤 칩 지급 쿨다운
     async def can_giveaway(self, chat_id: int, user_id: int) -> bool:
         now = datetime.now(KST)
-        last_user = self._mem_last_giveaway_user.get(user_id)
-        last_chat = self._mem_last_giveaway_chat.get(chat_id)
-        if last_user and (now - last_user) < timedelta(minutes=GIVEAWAY_USER_COOLDOWN_MIN):
+        u = self._mem_last_give_user.get(user_id)
+        c = self._mem_last_give_chat.get(chat_id)
+        if u and (now - u) < timedelta(minutes=GIVEAWAY_USER_COOLDOWN_MIN):
             return False
-        if last_chat and (now - last_chat) < timedelta(seconds=GIVEAWAY_CHAT_COOLDOWN_SEC):
+        if c and (now - c) < timedelta(seconds=GIVEAWAY_CHAT_COOLDOWN_SEC):
             return False
         return True
 
     async def mark_giveaway(self, chat_id: int, user_id: int):
         now = datetime.now(KST)
-        self._mem_last_giveaway_user[user_id] = now
-        self._mem_last_giveaway_chat[chat_id] = now
+        self._mem_last_give_user[user_id] = now
+        self._mem_last_give_chat[chat_id] = now
 
 storage = Storage()
 
-# ======= 게임 모델 =======
+# ===== 게임 모델 =====
 SUITS = ["♠", "♥", "♦", "♣"]
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K"]
 RANK_VALUE = {r: i for i, r in enumerate(RANKS)}  # A=0
@@ -214,8 +209,8 @@ class Player:
     username: str
     hand: List[Tuple[str, str]] = field(default_factory=list)
     folded: bool = False
-    current_bet: int = 0  # 현재 라운드의 내 베팅액
-    total_put: int = 0    # 현재 라운드 총 기여액(사이드팟 계산용)
+    current_bet: int = 0
+    total_put: int = 0
 
 @dataclass
 class GameRoom:
@@ -225,25 +220,24 @@ class GameRoom:
     players: Dict[int, Player] = field(default_factory=dict)
     deck: List[Tuple[str, str]] = field(default_factory=list)
 
-    # 스테이크 설정
     ante: int = ANTE_DEFAULT
     min_chips: int = MIN_CHIPS_DEFAULT
     join_bonus: int = JOIN_BONUS
 
-    pot: int = 0
+    pot_antes: int = 0  # 앤티 총합(가장 작은 팟에 합산)
+
     turn_order: List[int] = field(default_factory=list)
     turn_index: int = 0
     current_bet: int = 0
 
     awaiting_user: Optional[int] = None
-    awaiting_custom_raise: Optional[int] = None  # 사용자 입력 레이즈 대기 user id
+    awaiting_custom_raise: Optional[int] = None
 
 rooms: Dict[int, GameRoom] = {}
 
-# (chat_id, user_id) → 커스텀 레이즈 입력 대기 플래그
-pending_custom_raise: Set[Tuple[int, int]] = set()
+pending_custom_raise: Set[Tuple[int, int]] = set()  # (chat_id, user_id)
 
-# ======= 유틸 =======
+# ===== 유틸 =====
 
 def format_hand(hand: List[Tuple[str, str]]) -> str:
     return " ".join([f"{r}{s}" for r, s in hand])
@@ -280,7 +274,7 @@ def heuristic_discards(hand: List[Tuple[str, str]], count: int) -> List[int]:
     scored.sort(reverse=True)
     return [i for _, i in scored[:count]]
 
-# ======= 콜백 키 =======
+# ===== 콜백 키 =====
 CB_JOIN = "join"
 CB_START = "start"
 CB_CALL = "call"
@@ -289,40 +283,42 @@ CB_RAISE = "raise_"  # 뒤에 금액
 CB_RAISE_CUSTOM = "raise_custom"
 CB_EXC = {i: f"exch_{i}" for i in range(5)}
 
-# ======= 명령어 =======
-# 🔧 전체 수정: f-string 줄바꿈 오류 재발 방지
-# 이전 수정이 일부 반영되지 않아 여전히 SyntaxError 발생. 이번엔 안전하게 삼중 따옴표(`"""`) 사용으로 해결.
-
-async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== 명령어 =====
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
-    total_games = prof['wins'] + prof['losses']
-    win_rate = (prof['wins'] / total_games * 100) if total_games > 0 else 0
     await update.message.reply_text(
-        f"""👤 {user.mention_html()}님의 정보
-💰 보유 칩: {prof['chips']}
-🏆 전적: {prof['wins']}승 {prof['losses']}패
-📊 승률: {win_rate:.1f}%""",
+        (
+            f"안녕하세요 {user.mention_html()}! 바둑이 봇입니다.
+"
+            f"/바둑이 로 로비를 만들거나 참가하세요. (예: /바둑이, /바둑이 500)
+"
+            f"/출석(하루 1회 +{CHECKIN_REWARD}), /내정보, /랭킹, /송금 <상대ID> <금액>
+"
+            f"보유 칩: {prof['chips']}개"
+        ),
         parse_mode="HTML",
     )
-
-# 🔑 주요 변경점:
-# - 삼중 따옴표 f-string(`f""" ... """`) 사용하여 여러 줄 안전하게 처리
-# - 줄바꿈은 그대로 유지되며 SyntaxError 발생하지 않음
-
-
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await storage.ensure_user(user.id, user.username or user.full_name)
     prof = await storage.get_profile(user.id)
-    wr = 0.0
-    if prof.get("games", 0) > 0:
-        wr = round(100.0 * prof.get("wins", 0) / prof.get("games", 1), 1)
+    wins = prof.get("wins", 0)
+    games = prof.get("games", 0)
+    losses = max(0, games - wins)
+    wr = round(100.0 * wins / games, 1) if games > 0 else 0.0
     await update.message.reply_text(
-        f"👤 {user.mention_html()}
-칩: {prof['chips']}
-전적: {prof.get('wins',0)}승 / {prof.get('games',0)}판 (승률 {wr}%)",
+        (
+            f"👤 {user.mention_html()}
+"
+            f"칩: {prof['chips']}
+"
+            f"전적: {wins}승 {losses}패 / {games}판
+"
+            f"승률: {wr}%"
+        ),
         parse_mode="HTML",
     )
 
@@ -331,7 +327,8 @@ async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["🏆 칩 랭킹 Top 10"]
     for i, row in enumerate(top, 1):
         name = row.get("username") or str(row.get("_id") or row.get("user_id"))
-        lines.append(f"{i}. {name} - {row.get('chips',0)}칩")
+        chips = row.get("chips", 0)
+        lines.append(f"{i}. {name} - {chips}칩")
     await update.message.reply_text("
 ".join(lines))
 
@@ -347,10 +344,7 @@ async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("숫자를 올바르게 입력해주세요.")
         return
     ok = await storage.transfer(user.id, target, amount)
-    if ok:
-        await update.message.reply_text(f"✅ {target}에게 {amount}칩 송금 완료")
-    else:
-        await update.message.reply_text("❌ 송금 실패 (잔액 부족/잘못된 금액)")
+    await update.message.reply_text("✅ 송금 완료" if ok else "❌ 송금 실패 (잔액 부족/잘못된 금액)")
 
 async def cmd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -388,16 +382,15 @@ async def cmd_set_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await storage.set_secondary_admin(target)
     await update.message.reply_text(f"관리자 임명 완료: {target}")
 
-# 로비/시작 (/바둑이 [min_chips])
+# /바둑이 [min]
 async def cmd_badugi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     await storage.ensure_user(user.id, user.username or user.full_name)
 
-    # 스테이크 파싱
     if context.args and len(context.args) >= 1 and context.args[0].isdigit():
         min_chips = int(context.args[0])
-        ante = max(ANTE_DEFAULT, max(10, min_chips // 20))  # 간단한 스케일링 규칙
+        ante = max(ANTE_DEFAULT, max(10, min_chips // 20))
     else:
         min_chips = MIN_CHIPS_DEFAULT
         ante = ANTE_DEFAULT
@@ -407,11 +400,9 @@ async def cmd_badugi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         room = GameRoom(chat_id=chat_id, host_id=user.id, ante=ante, min_chips=min_chips, join_bonus=JOIN_BONUS)
         rooms[chat_id] = room
     else:
-        # 로비가 아니면 대기
         if room.state != "LOBBY":
             await update.message.reply_text("현재 라운드 진행 중입니다. 잠시만 기다려주세요.")
             return
-        # 로비라면 스테이크 재설정 허용(호스트/최초관리자)
         if user.id == room.host_id or await storage.is_primary_admin(user.id):
             room.ante = ante
             room.min_chips = min_chips
@@ -423,17 +414,21 @@ async def cmd_badugi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     current_players = ", ".join([p.username or str(pid) for pid, p in room.players.items()]) or "(없음)"
     await update.message.reply_text(
-        f"🎲 바둑이 로비 생성!
+        (
+            f"🎲 바둑이 로비 생성!
 "
-        f"스테이크: ante {room.ante}, 최소 보유칩 {room.min_chips}, 참가 보너스 +{room.join_bonus}
+            f"스테이크: ante {room.ante}, 최소 보유칩 {room.min_chips}, 참가 보너스 +{room.join_bonus}
 "
-        f"참가 인원: {len(room.players)}/{MAX_PLAYERS}
-현재 참가자: {current_players}
-호스트: {room.host_id}",
+            f"참가 인원: {len(room.players)}/{MAX_PLAYERS}
+"
+            f"현재 참가자: {current_players}
+"
+            f"호스트: {room.host_id}"
+        ),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# ======= 버튼 콜백 =======
+# ===== 버튼 핸들러 =====
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -446,7 +441,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("방이 존재하지 않습니다. /바둑이 로 다시 시작")
         return
 
-    # JOIN/START
     if data == CB_JOIN:
         if room.state != "LOBBY":
             return
@@ -454,11 +448,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if user.id not in room.players:
             prof = await storage.get_profile(user.id)
-            # 최소 보유칩 검사
             if prof["chips"] < room.min_chips:
-                await query.edit_message_text(f"최소 {room.min_chips}칩 이상 보유해야 참가할 수 있습니다. /출석 으로 칩을 모아보세요.")
+                await query.edit_message_text(
+                    f"최소 {room.min_chips}칩 이상 보유해야 참가 가능합니다. /출석 으로 칩을 모아보세요."
+                )
                 return
-            # 참가 보너스
             await storage.add_chips(user.id, room.join_bonus)
             room.players[user.id] = Player(user_id=user.id, username=user.username or user.full_name)
         await refresh_lobby(query.message, room)
@@ -477,17 +471,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 배팅/교환 액션 (턴 기반)
     pid = user.id
-    if room.awaiting_user != pid:
+    if room.awaiting_user != pid and data != CB_RAISE_CUSTOM:
         return
 
     if data == CB_CALL:
         await handle_call(context, room, pid)
         return
-
     if data == CB_FOLD:
         await handle_fold(context, room, pid)
         return
-
     if data.startswith(CB_RAISE):
         try:
             amt = data.split("_")[1]
@@ -496,13 +488,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await handle_raise(context, room, pid, amount)
         return
-
     if data == CB_RAISE_CUSTOM:
-        # DM으로 금액 입력 요청
         await prompt_custom_raise(context, room, pid)
         return
-
-    # 교환
     if data.startswith("exch_"):
         try:
             cnt = int(data.split("_")[1])
@@ -519,24 +507,30 @@ async def refresh_lobby(message, room: GameRoom):
     current_players = ", ".join([p.username or str(pid) for pid, p in room.players.items()]) or "(없음)"
     try:
         await message.edit_text(
-            f"🎲 바둑이 로비
-스테이크: ante {room.ante}, 최소 보유칩 {room.min_chips}, 참가 보너스 +{room.join_bonus}
-참가 인원: {len(room.players)}/{MAX_PLAYERS}
-현재 참가자: {current_players}
-호스트: {room.host_id}",
+            (
+                f"🎲 바둑이 로비
+"
+                f"스테이크: ante {room.ante}, 최소 보유칩 {room.min_chips}, 참가 보너스 +{room.join_bonus}
+"
+                f"참가 인원: {len(room.players)}/{MAX_PLAYERS}
+"
+                f"현재 참가자: {current_players}
+"
+                f"호스트: {room.host_id}"
+            ),
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
     except BadRequest:
         pass
 
-# ======= 라운드 진행 =======
+# ===== 라운드 진행 =====
 async def start_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
     room.state = "DEAL"
-    room.pot = 0
     room.current_bet = 0
+    room.pot_antes = 0
+    room.turn_index = 0
     room.make_deck()
 
-    # 앤티 차감 + 패 DM
     to_kick = []
     for pid in list(room.players.keys()):
         p = room.players[pid]
@@ -545,7 +539,7 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
             to_kick.append(pid)
             continue
         await storage.add_chips(pid, -room.ante)
-        room.pot += room.ante
+        room.pot_antes += room.ante
         p.folded = False
         p.current_bet = 0
         p.total_put = 0
@@ -586,67 +580,74 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
 def alive_count(room: GameRoom) -> int:
     return sum(1 for p in room.players.values() if not p.folded)
 
-# ========== 배팅 라운드 (턴 + DM) ==========
+# ===== 배팅(턴 + DM) =====
 async def betting_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, phase: str, title: str):
     room.state = phase
     room.current_bet = 0
     for p in room.players.values():
         p.current_bet = 0
-        p.total_put += 0  # 유지
-    await context.bot.send_message(room.chat_id, f"🕒 {title} 시작! 각 플레이어의 DM을 확인하세요.")
+    await context.bot.send_message(room.chat_id, f"🕒 {title} 시작! 각자 DM을 확인하세요.")
 
     active = [pid for pid in room.turn_order if not room.players[pid].folded]
     if len(active) < 2:
         return
 
-    while True:
-        progressed = False
+    progressed_any = True
+    while progressed_any:
+        progressed_any = False
         for pid in list(active):
             player = room.players.get(pid)
             if not player or player.folded:
                 continue
             need = max(0, room.current_bet - player.current_bet)
-
-            # 버튼: 콜/폴드 + 프리셋 레이즈 + 사용자 입력 + 올인
-            buttons = [[InlineKeyboardButton("콜", callback_data=CB_CALL), InlineKeyboardButton("폴드", callback_data=CB_FOLD)]]
-            raise_row = []
-            # 잔액 확인
             prof = await storage.get_profile(pid)
             mychips = prof["chips"]
+
+            buttons = [[InlineKeyboardButton("콜", callback_data=CB_CALL), InlineKeyboardButton("폴드", callback_data=CB_FOLD)]]
+            raise_row: List[InlineKeyboardButton] = []
             if mychips > need:
                 for amt in RAISE_CHOICES:
                     if mychips >= need + amt:
                         raise_row.append(InlineKeyboardButton(f"+{amt}", callback_data=f"{CB_RAISE}{amt}"))
                 raise_row.append(InlineKeyboardButton("올인", callback_data=f"{CB_RAISE}allin"))
                 raise_row.append(InlineKeyboardButton("직접입력", callback_data=CB_RAISE_CUSTOM))
-            buttons.append(raise_row)
+            if raise_row:
+                buttons.append(raise_row)
 
             room.awaiting_user = pid
-            # DM 발송
             try:
-                await context.bot.send_message(pid, f"{title} — 현재콜 {room.current_bet} / 당신 필요 {need}
-보유칩 {mychips}", reply_markup=InlineKeyboardMarkup(buttons))
+                await context.bot.send_message(
+                    pid,
+                    (
+                        f"{title}
+"
+                        f"현재 콜: {room.current_bet} / 당신 필요: {need}
+"
+                        f"보유칩: {mychips}"
+                    ),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
             except Forbidden:
-                # DM 불가 → 그룹으로 안내
-                await context.bot.send_message(room.chat_id, f"{player.username} 님 DM 불가 → 여기서 선택", reply_markup=InlineKeyboardMarkup(buttons))
+                await context.bot.send_message(
+                    room.chat_id,
+                    f"{player.username} 님 DM 불가 → 여기서 선택",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
 
             try:
                 await asyncio.wait_for(wait_until_turn_done(room, pid), timeout=BETTING_SECONDS)
             except asyncio.TimeoutError:
-                # 자동 처리: 콜 가능하면 콜, 아니면 폴드
                 if mychips >= need:
                     await handle_call(context, room, pid, silent=True)
                 else:
                     await handle_fold(context, room, pid, silent=True)
 
-            progressed = True
+            progressed_any = True
 
-            # 종료 체크: 생존자 전원 current_bet 동일 or 1명만 생존
-            if all_bets_equal(room) or alive_count(room) <= 1:
-                room.awaiting_user = None
-                return
-        if not progressed:
-            break
+        # 모두의 current_bet이 같거나 1명만 남으면 종료
+        if all_bets_equal(room) or alive_count(room) <= 1:
+            room.awaiting_user = None
+            return
 
 
 def all_bets_equal(room: GameRoom) -> bool:
@@ -670,19 +671,19 @@ async def prompt_custom_raise(context: ContextTypes.DEFAULT_TYPE, room: GameRoom
     try:
         await context.bot.send_message(pid, "레이즈 금액을 숫자로 입력하세요(예: 125). 취소하려면 무시하세요.")
     except Forbidden:
-        await context.bot.send_message(room.chat_id, f"{room.players[pid].username} 님, DM이 막혀있어 사용자 입력 레이즈를 사용할 수 없습니다.")
+        await context.bot.send_message(room.chat_id, f"{room.players[pid].username} 님 DM이 막혀 사용자 입력 레이즈 불가")
         room.awaiting_custom_raise = None
         pending_custom_raise.discard((room.chat_id, pid))
 
-# DM에서 사용자 입력 금액 받기
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-    user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
     if not text.isdigit():
         return
-    # 어떤 방에서 대기 중인지 찾기
+    user_id = update.effective_user.id
     for chat_id, room in rooms.items():
         if room.awaiting_custom_raise == user_id and (chat_id, user_id) in pending_custom_raise:
             amount = int(text)
@@ -691,7 +692,7 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_raise(context, room, user_id, amount)
             return
 
-# ========== 교환 라운드 (DM 우선) ==========
+# ===== 교환(DM 우선) =====
 async def exchange_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, phase: str, title: str):
     room.state = phase
     await context.bot.send_message(room.chat_id, f"🔁 {title} 시작! 각자 DM에서 0~4장 교환을 선택하세요.")
@@ -702,10 +703,23 @@ async def exchange_round(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, pha
         room.awaiting_user = pid
         keyboard = [[InlineKeyboardButton(f"{i}장", callback_data=CB_EXC[i]) for i in range(0,5)]]
         try:
-            await context.bot.send_message(pid, f"{title} — 현재 패: {format_hand(p.hand)}
-교환할 장수를 선택하세요.", reply_markup=InlineKeyboardMarkup(keyboard))
+            await context.bot.send_message(
+                pid,
+                (
+                    f"{title}
+"
+                    f"현재 패: {format_hand(p.hand)}
+"
+                    f"교환할 장수를 선택하세요"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         except Forbidden:
-            await context.bot.send_message(room.chat_id, f"{p.username} DM 불가 → 여기서 교환 수 선택", reply_markup=InlineKeyboardMarkup(keyboard))
+            await context.bot.send_message(
+                room.chat_id,
+                f"{p.username} DM 불가 → 여기서 교환 수 선택",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         try:
             await asyncio.wait_for(wait_until_turn_done(room, pid), timeout=EXCHANGE_SECONDS)
         except asyncio.TimeoutError:
@@ -729,7 +743,7 @@ async def handle_exchange_choice(context: ContextTypes.DEFAULT_TYPE, room: GameR
         await context.bot.send_message(room.chat_id, f"{p.username} 교환 {count}장 완료")
     room.awaiting_user = None
 
-# ========== 베팅 액션 ==========
+# ===== 베팅 액션 =====
 async def handle_call(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, pid: int, silent: bool=False):
     p = room.players.get(pid)
     if not p or p.folded:
@@ -737,18 +751,13 @@ async def handle_call(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, pid: i
     need = max(0, room.current_bet - p.current_bet)
     prof = await storage.get_profile(pid)
     mychips = prof["chips"]
-    # 사이드팟: 가진 만큼만 지불하고 올인 허용
     to_put = min(need, mychips)
     await storage.add_chips(pid, -to_put)
     p.current_bet += to_put
     p.total_put += to_put
-    if to_put < need:
-        # 콜 부족 → 올인 상태로 고정(추가 액션 불가), 그러나 폴드 아님
-        pass
     if not silent:
         await context.bot.send_message(room.chat_id, f"{p.username} 콜({to_put})")
     room.awaiting_user = None
-    # 현재콜 갱신 필요 없음(콜)
 
 async def handle_fold(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, pid: int, silent: bool=False):
     p = room.players.get(pid)
@@ -785,7 +794,7 @@ async def handle_raise(context: ContextTypes.DEFAULT_TYPE, room: GameRoom, pid: 
     await context.bot.send_message(room.chat_id, f"{p.username} 레이즈 → 현재콜 {room.current_bet}")
     room.awaiting_user = None
 
-# ========== 쇼다운 + 사이드팟 분배 ==========
+# ===== 쇼다운(사이드팟 분배) =====
 async def showdown(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
     room.state = "SHOWDOWN"
     alive = [p for p in room.players.values() if not p.folded]
@@ -794,28 +803,24 @@ async def showdown(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
         room.state = "LOBBY"
         return
 
-    # 사이드팟 계산
     pots = build_side_pots(room)
 
-    # 결과 메시지(비공개 패였어도 쇼다운은 공개)
     lines = ["👑 쇼다운"]
     for p in alive:
         lines.append(f"- {p.username}: {format_hand(p.hand)} → 키 {badugi_rank_key(p.hand)}")
 
-    # 각 팟에 대해 승자 판정 및 분배
     for i, pot in enumerate(pots, 1):
         elig = [room.players[pid] for pid in pot["eligible"] if not room.players[pid].folded]
         if not elig:
             continue
         ranked = sorted(elig, key=lambda x: badugi_rank_key(x.hand))
-        best_key = badugi_rank_key(ranked[0].hand)
-        winners = [p for p in ranked if badugi_rank_key(p.hand) == best_key]
+        best = badugi_rank_key(ranked[0].hand)
+        winners = [p for p in ranked if badugi_rank_key(p.hand) == best]
         share = pot["amount"] // max(1, len(winners))
         for w in winners:
             await storage.add_chips(w.user_id, share)
             await storage.record_game(w.user_id, True)
-        losers = [p for p in elig if p.user_id not in [w.user_id for w in winners]]
-        for l in losers:
+        for l in [p for p in elig if p.user_id not in [w.user_id for w in winners]]:
             await storage.record_game(l.user_id, False)
         lines.append(f"팟{i}: {pot['amount']}칩 → 승자 {', '.join(w.username for w in winners)} (각 {share})")
 
@@ -824,18 +829,15 @@ async def showdown(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
     room.state = "LOBBY"
     await context.bot.send_message(room.chat_id, "새 라운드를 시작하려면 /바둑이 를 입력하세요.")
 
-# 사이드팟 구성: 각 플레이어 total_put 기준으로 티어링
+# 사이드팟 생성: total_put 기반 티어링 + 앤티를 가장 작은 팟에 합산
 def build_side_pots(room: GameRoom) -> List[Dict[str, Any]]:
-    contrib = {pid: p.total_put for pid, p in room.players.items() if not p.folded and p.total_put > 0}
-    if not contrib:
-        return [{"amount": room_pot_sum(room), "eligible": [pid for pid, p in room.players.items() if not p.folded]}]
-    # unique levels
+    contrib = {pid: p.total_put for pid, p in room.players.items() if not p.folded}
     levels = sorted(set(contrib.values()))
-    pots = []
+    pots: List[Dict[str, Any]] = []
     prev = 0
     for lvl in levels:
         amount = 0
-        eligible = []
+        eligible: List[int] = []
         for pid, put in contrib.items():
             take = max(0, min(put, lvl) - prev)
             if take > 0:
@@ -844,48 +846,34 @@ def build_side_pots(room: GameRoom) -> List[Dict[str, Any]]:
         if amount > 0:
             pots.append({"amount": amount, "eligible": eligible})
         prev = lvl
-    # 남은 오버액(모두가 lvl 이상 낸 부분)
-    # 실제로는 마지막 레벨 이상은 동일하게 들어간 금액이 없음 → 이미 분해됨
-    # 앤티로 쌓인 초기 팟 반영: total_put에는 베팅만 포함. 앤티 합산 필요.
-    ante_only = room_pot_sum(room) - sum(p.total_put for p in room.players.values())
-    if ante_only > 0:
-        # 앤티는 모든 생존자 자격
-        elig_ante = [pid for pid, p in room.players.items() if not p.folded]
-        if pots:
-            pots[0]["amount"] += ante_only  # 가장 작은 팟에 합산
-        else:
-            pots.append({"amount": ante_only, "eligible": elig_ante})
+    # 앤티 합산
+    if pots:
+        pots[0]["amount"] += room.pot_antes
+    elif room.pot_antes > 0:
+        elig_all = [pid for pid, p in room.players.items() if not p.folded]
+        pots.append({"amount": room.pot_antes, "eligible": elig_all})
     return pots
 
-def room_pot_sum(room: GameRoom) -> int:
-    # 총합 = 플레이어 베팅 총합 + (기존 room.pot에 매 라운드 더한 금액). 여기선 room.pot이 앤티 + 베팅 누적.
-    return sum(p.total_put for p in room.players.values()) + room.pot
-
-# ======= 에러 핸들러 & 앱 =======
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
-
-# ======= 랜덤 칩 지급 핸들러 =======
+# ===== 랜덤 칩 지급 =====
 async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not user or user.is_bot:
         return
-    # 그룹/슈퍼그룹/채널에서만(개인 DM 제외)
     if chat.type == "private":
         return
-    # 확률 + 쿨다운
     if random.random() < GIVEAWAY_PROB and await storage.can_giveaway(chat.id, user.id):
         amount = random.randint(GIVEAWAY_MIN, GIVEAWAY_MAX)
         await storage.ensure_user(user.id, user.username or user.full_name)
         await storage.add_chips(user.id, amount)
         await storage.mark_giveaway(chat.id, user.id)
-        try:
-            await context.bot.send_message(chat.id, f"🎉 @{user.username or user.full_name} 님 랜덤 보너스 +{amount}칩!")
-        except Exception:
-            await context.bot.send_message(chat.id, f"🎉 보너스 +{amount}칩 지급!")
+        name = user.username or user.full_name
+        await context.bot.send_message(chat.id, f"🎉 @{name} 님 보너스 +{amount}칩!")
 
-# ======= 앱 빌드 =======
+# ===== 에러 핸들러 & 앱 =====
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+
 
 def build_app() -> Application:
     if not BOT_TOKEN:
@@ -903,10 +891,7 @@ def build_app() -> Application:
 
     app.add_handler(CallbackQueryHandler(on_button))
 
-    # DM 사용자 입력(커스텀 레이즈)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, on_private_text))
-
-    # 랜덤 칩 지급: 모든 메시지 후크 (명령 제외)
     app.add_handler(MessageHandler(~filters.COMMAND & filters.ALL, on_any_message))
 
     app.add_error_handler(on_error)
@@ -915,8 +900,9 @@ def build_app() -> Application:
 
 def main():
     app = build_app()
-    logger.info("🤖 바둑이 게임봇 v5.0 시작")
+    logger.info("🤖 바둑이 게임봇 v5.1 시작")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
