@@ -290,8 +290,8 @@ CB_RAISE_CUSTOM = "raise_custom"
 CB_EXC = {i: f"exch_{i}" for i in range(5)}
 
 # ======= 명령어 =======
-# 🔧 수정 사항 2: 또 다른 SyntaxError 발생 원인
-# f-string이 줄바꿈에서 닫히지 않아 오류 발생. 해결책: 문자열 묶음을 괄호 `( )`로 감싸고, 각 줄 끝에 `\n` 붙여줌.
+# 🔧 전체 수정: f-string 줄바꿈 오류 재발 방지
+# 이전 수정이 일부 반영되지 않아 여전히 SyntaxError 발생. 이번엔 안전하게 삼중 따옴표(`"""`) 사용으로 해결.
 
 async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -299,18 +299,17 @@ async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_games = prof['wins'] + prof['losses']
     win_rate = (prof['wins'] / total_games * 100) if total_games > 0 else 0
     await update.message.reply_text(
-        (
-            f"👤 {user.mention_html()}님의 정보\n"
-            f"💰 보유 칩: {prof['chips']}\n"
-            f"🏆 전적: {prof['wins']}승 {prof['losses']}패\n"
-            f"📊 승률: {win_rate:.1f}%"
-        ),
+        f"""👤 {user.mention_html()}님의 정보
+💰 보유 칩: {prof['chips']}
+🏆 전적: {prof['wins']}승 {prof['losses']}패
+📊 승률: {win_rate:.1f}%""",
         parse_mode="HTML",
     )
 
 # 🔑 주요 변경점:
-# - 여러 줄 f-string을 괄호 안에 넣고 각 줄 끝에 `\n` 추가
-# - SyntaxError 방지
+# - 삼중 따옴표 f-string(`f""" ... """`) 사용하여 여러 줄 안전하게 처리
+# - 줄바꿈은 그대로 유지되며 SyntaxError 발생하지 않음
+
 
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
