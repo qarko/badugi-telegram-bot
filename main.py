@@ -1,4 +1,4 @@
-# main.py (v7.0 - Standard & Stable Startup)
+# main.py (v7.1 - Final Verified)
 
 import os
 import logging
@@ -54,7 +54,8 @@ game = BadugiGame()
 # --- 4. 헬퍼 함수 (DB 관련) ---
 async def get_user_data(user_id: int, username: str) -> dict:
     """사용자 정보를 가져오거나 새로 생성합니다."""
-    if not db:
+    # [FIX] 'if not db' -> 'if db is None'
+    if db is None:
         return {"user_id": user_id, "username": username, "chips": 10000, "role": "user"}
 
     user = await users_collection.find_one({"user_id": user_id})
@@ -85,7 +86,7 @@ async def get_user_role(user_id: int) -> str:
 
 async def update_user_chips(user_id: int, amount: int):
     """사용자의 칩을 변경합니다."""
-    if db:
+    if db is not None:
         await users_collection.update_one({"user_id": user_id}, {"$inc": {"chips": amount}})
 
 
@@ -130,7 +131,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def ranking_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """칩 랭킹 보기"""
-    if not db:
+    if db is None:
         await update.message.reply_text("데이터베이스가 연결되지 않았습니다.")
         return
     
@@ -210,8 +211,6 @@ def main() -> None:
     
     application = Application.builder().token(TOKEN).build()
     
-    # 오래된 업데이트 메시지를 청소하는 로직은 run_polling에 포함
-    
     # 명령어 핸들러 등록
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/바둑이$'), badugi_command))
@@ -221,7 +220,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/강제초기화$'), force_reset_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/관리자임명$'), set_admin_command))
 
-    print("🤖 바둑이 게임봇 v7.0 (Stable Startup)이 시작되었습니다.")
+    print("🤖 바둑이 게임봇 v7.1 (DB Fix)이 시작되었습니다.")
     
     # 봇 실행 (라이브러리가 내부적으로 asyncio 루프를 관리)
     application.run_polling(drop_pending_updates=True)
