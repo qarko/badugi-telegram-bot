@@ -1,6 +1,6 @@
-# main.py — v6.0 (안정화 완전체 수정본)
-# 모든 안내 메시지는 삼중 따옴표(""") 또는 괄호 연결 + .format()을 사용해
-# 줄바꿈/따옴표 문제를 원천 차단했습니다. f-string 미사용.
+# main.py — v6.1 (한글 -접두사 트리거 / DM 인터랙션 / 3차 배팅+교환 / 사이드팟 / 관리자 / 출석 / 랜덤칩)
+# - 모든 멀티라인 문자열은 삼중 따옴표 또는 괄호 연결 + .format() 사용 (f-string 미사용)
+# - 텔레그램 슬래시 명령은 영문으로 등록(호환), 실제 사용은 한글 텍스트 또는 "-명령어" 권장
 
 import os
 import logging
@@ -298,7 +298,7 @@ CB_RAISE_CUSTOM = "raise_custom"
 CB_EXC = {i: "exch_{}".format(i) for i in range(5)}
 
 # =====================
-# 명령어
+# 명령어 & 한글 텍스트 트리거
 # =====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -307,9 +307,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = """
 안녕하세요 {}! 바둑이 봇입니다.
 
-/바둑이 로 로비를 만들거나 참가하세요. (예: /바둑이, /바둑이 500)
+-바둑이 로 로비를 만들거나 참가하세요. (예: -바둑이, -바둑이 500)
 
-/출석(하루 1회 +{}칩) /내정보 /랭킹 /송금 <상대ID> <금액>
+-출석(하루 1회 +{}칩)  -내정보  -랭킹  -송금 <상대ID> <금액>
 
 보유 칩: {}개
 """.format(user.mention_html(), CHECKIN_REWARD, prof.get('chips', 0))
@@ -343,7 +343,7 @@ async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if len(context.args) < 2:
-        await update.message.reply_text("사용법: /송금 <상대ID> <금액>")
+        await update.message.reply_text("사용법: -송금 <상대ID> <금액>")
         return
     try:
         target = int(context.args[0])
@@ -364,6 +364,49 @@ async def cmd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("오늘은 이미 출석하셨습니다. 내일 다시 시도해주세요.")
 
+# ========= 한글 텍스트 트리거 =========
+async def on_korean_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+
+    # 접두사 지원: "-명령어" 형태를 일반 텍스트 명령으로 인식
+    if text.startswith("-"):
+        text = text[1:].lstrip()
+
+    parts = text.split()
+    if not parts:
+        return
+    cmd = parts[0]
+    args = parts[1:]
+
+    if cmd in ["내정보", "정보", "프로필"]:
+        await cmd_info(update, context)
+        return
+    if cmd in ["랭킹", "순위", "랭크"]:
+        await cmd_rank(update, context)
+        return
+    if cmd in ["출석", "출첵", "출석체크"]:
+        await cmd_checkin(update, context)
+        return
+    if cmd in ["송금", "보내기", "이체"]:
+        context.args = args
+        await cmd_transfer(update, context)
+        return
+    if cmd in ["바둑이", "게임시작", "로비"]:
+        context.args = []
+        if args and args[0].isdigit():
+            context.args = [args[0]]
+        await cmd_badugi(update, context)
+        return
+    if cmd in ["강제초기화", "초기화", "리셋"]:
+        await cmd_force_reset(update, context)
+        return
+    if cmd in ["관리자임명", "관리자", "어드민"]:
+        context.args = args
+        await cmd_set_admin(update, context)
+        return
+
 async def cmd_force_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await storage.is_admin(user.id):
@@ -380,7 +423,7 @@ async def cmd_set_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("최초 관리자만 임명할 수 있습니다.")
         return
     if len(context.args) < 1:
-        await update.message.reply_text("사용법: /관리자임명 <유저ID>")
+        await update.message.reply_text("사용법: -관리자임명 <유저ID>")
         return
     try:
         target = int(context.args[0])
@@ -442,7 +485,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     room = rooms.get(chat_id)
     if not room:
-        await query.edit_message_text("방이 존재하지 않습니다. /바둑이 로 다시 시작")
+        await query.edit_message_text("방이 존재하지 않습니다. -바둑이 로 다시 시작")
         return
 
     if data == CB_JOIN:
@@ -453,7 +496,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user.id not in room.players:
             prof = await storage.get_profile(user.id)
             if prof["chips"] < room.min_chips:
-                await query.edit_message_text("최소 {}칩 이상 보유해야 참가 가능합니다. /출석 으로 칩을 모아보세요.".format(room.min_chips))
+                await query.edit_message_text("최소 {}칩 이상 보유해야 참가 가능합니다. -출석 으로 칩을 모아보세요.".format(room.min_chips))
                 return
             await storage.add_chips(user.id, room.join_bonus)
             room.players[user.id] = Player(user_id=user.id, username=user.username or user.full_name)
@@ -829,7 +872,7 @@ async def showdown(context: ContextTypes.DEFAULT_TYPE, room: GameRoom):
 
     await context.bot.send_message(room.chat_id, "\n".join(lines))
     room.state = "LOBBY"
-    await context.bot.send_message(room.chat_id, "새 라운드를 시작하려면 /바둑이 를 입력하세요.")
+    await context.bot.send_message(room.chat_id, "새 라운드를 시작하려면 -바둑이 를 입력하세요.")
 
 # 사이드팟 생성: total_put 기반 티어링 + 앤티를 가장 작은 팟에 합산
 def build_side_pots(room: GameRoom) -> List[Dict[str, Any]]:
@@ -885,18 +928,25 @@ def build_app() -> Application:
         raise RuntimeError("환경변수 BOT_TOKEN 이 설정되어야 합니다.")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # 영문 슬래시 명령(호환용)
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("내정보", cmd_info))
-    app.add_handler(CommandHandler("랭킹", cmd_rank))
-    app.add_handler(CommandHandler("송금", cmd_transfer))
-    app.add_handler(CommandHandler("출석", cmd_checkin))
-    app.add_handler(CommandHandler("강제초기화", cmd_force_reset))
-    app.add_handler(CommandHandler("관리자임명", cmd_set_admin))
-    app.add_handler(CommandHandler("바둑이", cmd_badugi))
+    app.add_handler(CommandHandler("myinfo", cmd_info))
+    app.add_handler(CommandHandler("rank", cmd_rank))
+    app.add_handler(CommandHandler("transfer", cmd_transfer))
+    app.add_handler(CommandHandler("checkin", cmd_checkin))
+    app.add_handler(CommandHandler("forcereset", cmd_force_reset))
+    app.add_handler(CommandHandler("setadmin", cmd_set_admin))
+    app.add_handler(CommandHandler("badugi", cmd_badugi))
+
+    # 한글 텍스트 트리거(슬래시 없이 사용, "-명령어" 지원)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_korean_text))
 
     app.add_handler(CallbackQueryHandler(on_button))
 
+    # DM에서 사용자 입력 레이즈 처리
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, on_private_text))
+
+    # 랜덤 칩 지급 등 일반 메시지 처리 (마지막에)
     app.add_handler(MessageHandler(~filters.COMMAND & filters.ALL, on_any_message))
 
     app.add_error_handler(on_error)
@@ -905,7 +955,7 @@ def build_app() -> Application:
 
 def main():
     app = build_app()
-    logger.info("🤖 바둑이 게임봇 v6.0 시작")
+    logger.info("🤖 바둑이 게임봇 v6.1 시작")
     app.run_polling(drop_pending_updates=True)
 
 
